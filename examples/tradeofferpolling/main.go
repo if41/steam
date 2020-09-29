@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/if41/steam"
+	"github.com/nsolovyov/steam"
 )
 
 func main() {
