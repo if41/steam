@@ -42,6 +42,7 @@ const (
 	TradeFilterActiveOnly       = 1 << 3
 	TradeFilterHistoricalOnly   = 1 << 4
 	TradeFilterItemDescriptions = 1 << 5
+	TradeFilterUseTimeCutoff    = 1 << 6
 )
 
 var (
@@ -64,13 +65,14 @@ var (
 )
 
 type EconItem struct {
-	AssetID    uint64 `json:"assetid,string,omitempty"`
-	InstanceID uint64 `json:"instanceid,string,omitempty"`
-	ClassID    uint64 `json:"classid,string,omitempty"`
-	AppID      uint32 `json:"appid"`
-	ContextID  uint64 `json:"contextid,string"`
-	Amount     uint16 `json:"amount,string"`
-	Missing    bool   `json:"missing,omitempty"`
+	AssetID     uint64        `json:"assetid,string,omitempty"`
+	InstanceID  uint64        `json:"instanceid,string,omitempty"`
+	ClassID     uint64        `json:"classid,string,omitempty"`
+	AppID       uint32        `json:"appid"`
+	ContextID   uint64        `json:"contextid,string"`
+	Amount      uint16        `json:"amount,string"`
+	Missing     bool          `json:"missing,omitempty"`
+	Description *EconItemDesc `json:"-"` /* May be nil  */
 }
 
 type EconDesc struct {
@@ -94,7 +96,8 @@ type EconAction struct {
 type EconItemDesc struct {
 	ClassID         uint64        `json:"classid,string"`    // for matching with EconItem
 	InstanceID      uint64        `json:"instanceid,string"` // for matching with EconItem
-	Tradable        int           `json:"tradable"`
+	Tradable        bool          `json:"tradable"`
+	Currency        bool          `json:"currency"`
 	BackgroundColor string        `json:"background_color"`
 	IconURL         string        `json:"icon_url"`
 	IconLargeURL    string        `json:"icon_url_large"`
@@ -103,6 +106,7 @@ type EconItemDesc struct {
 	NameColor       string        `json:"name_color"`
 	MarketName      string        `json:"market_name"`
 	MarketHashName  string        `json:"market_hash_name"`
+	Type            string        `json:"type"`
 	Comodity        bool          `json:"comodity"`
 	Actions         []*EconAction `json:"actions"`
 	Tags            []*EconTag    `json:"tags"`
@@ -138,10 +142,12 @@ type APIResponse struct {
 }
 
 func (session *Session) GetTradeOffer(id uint64) (*TradeOffer, error) {
-	resp, err := session.client.Get(apiGetTradeOffer + url.Values{
-		"key":          {session.apiKey},
-		"tradeofferid": {strconv.FormatUint(id, 10)},
-	}.Encode())
+	resp, err := session.client.Get(
+		apiGetTradeOffer + url.Values{
+			"key":          {session.apiKey},
+			"tradeofferid": {strconv.FormatUint(id, 10)},
+		}.Encode(),
+	)
 	if resp != nil {
 		defer resp.Body.Close()
 	}
@@ -184,6 +190,9 @@ func (session *Session) GetTradeOffers(filter uint32, timeCutOff time.Time) (*Tr
 
 	if testBit(filter, TradeFilterHistoricalOnly) {
 		params.Set("historical_only", "1")
+	}
+
+	if testBit(filter, TradeFilterUseTimeCutoff) {
 		params.Set("time_historical_cutoff", strconv.FormatInt(timeCutOff.Unix(), 10))
 	}
 
@@ -201,7 +210,30 @@ func (session *Session) GetTradeOffers(filter uint32, timeCutOff time.Time) (*Tr
 		return nil, err
 	}
 
-	return response.Inner, nil
+	offerResponse := response.Inner
+	if testBit(filter, TradeFilterItemDescriptions) && len(offerResponse.Descriptions) > 0 {
+		for _, desc := range offerResponse.Descriptions {
+			setDescriptionForOffers(desc, offerResponse.ReceivedOffers)
+			setDescriptionForOffers(desc, offerResponse.SentOffers)
+		}
+	}
+
+	return offerResponse, nil
+}
+
+func setDescriptionForOffers(desc *EconItemDesc, offers []*TradeOffer) {
+	for _, offer := range offers {
+		setDescriptionForItems(desc, offer.RecvItems)
+		setDescriptionForItems(desc, offer.SendItems)
+	}
+}
+
+func setDescriptionForItems(desc *EconItemDesc, items []*EconItem) {
+	for _, item := range items {
+		if item.ClassID == desc.ClassID && item.InstanceID == desc.InstanceID {
+			item.Description = desc
+		}
+	}
 }
 
 func (session *Session) GetMyTradeToken() (string, error) {
@@ -238,10 +270,12 @@ type EscrowSteamGuardInfo struct {
 }
 
 func (session *Session) GetEscrowGuardInfo(sid SteamID, token string) (*EscrowSteamGuardInfo, error) {
-	resp, err := session.client.Get("https://steamcommunity.com/tradeoffer/new/?" + url.Values{
-		"partner": {strconv.FormatUint(uint64(sid.GetAccountID()), 10)},
-		"token":   {token},
-	}.Encode())
+	resp, err := session.client.Get(
+		"https://steamcommunity.com/tradeoffer/new/?" + url.Values{
+			"partner": {strconv.FormatUint(uint64(sid.GetAccountID()), 10)},
+			"token":   {token},
+		}.Encode(),
+	)
 	if resp != nil {
 		defer resp.Body.Close()
 	}
@@ -309,22 +343,26 @@ func (session *Session) SendTradeOffer(offer *TradeOffer, sid SteamID, token str
 	req, err := http.NewRequest(
 		http.MethodPost,
 		"https://steamcommunity.com/tradeoffer/new/send",
-		strings.NewReader(url.Values{
-			"sessionid":                 {session.sessionID},
-			"serverid":                  {"1"},
-			"partner":                   {sid.ToString()},
-			"tradeoffermessage":         {offer.Message},
-			"json_tradeoffer":           {string(contentJSON)},
-			"trade_offer_create_params": {"{\"trade_offer_access_token\":\"" + token + "\"}"},
-		}.Encode()),
+		strings.NewReader(
+			url.Values{
+				"sessionid":                 {session.sessionID},
+				"serverid":                  {"1"},
+				"partner":                   {sid.ToString()},
+				"tradeoffermessage":         {offer.Message},
+				"json_tradeoffer":           {string(contentJSON)},
+				"trade_offer_create_params": {"{\"trade_offer_access_token\":\"" + token + "\"}"},
+			}.Encode(),
+		),
 	)
 	if err != nil {
 		return err
 	}
-	req.Header.Add("Referer", "https://steamcommunity.com/tradeoffer/new/?"+url.Values{
-		"partner": {strconv.FormatUint(uint64(sid.GetAccountID()), 10)},
-		"token":   {token},
-	}.Encode())
+	req.Header.Add(
+		"Referer", "https://steamcommunity.com/tradeoffer/new/?"+url.Values{
+			"partner": {strconv.FormatUint(uint64(sid.GetAccountID()), 10)},
+			"token":   {token},
+		}.Encode(),
+	)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := session.client.Do(req)
@@ -414,10 +452,12 @@ func (session *Session) GetTradeReceivedItems(receiptID uint64) ([]*InventoryIte
 }
 
 func (session *Session) DeclineTradeOffer(id uint64) error {
-	resp, err := session.client.PostForm(apiDeclineTradeOffer, url.Values{
-		"key":          {session.apiKey},
-		"tradeofferid": {strconv.FormatUint(id, 10)},
-	})
+	resp, err := session.client.PostForm(
+		apiDeclineTradeOffer, url.Values{
+			"key":          {session.apiKey},
+			"tradeofferid": {strconv.FormatUint(id, 10)},
+		},
+	)
 	if resp != nil {
 		resp.Body.Close()
 	}
@@ -435,10 +475,12 @@ func (session *Session) DeclineTradeOffer(id uint64) error {
 }
 
 func (session *Session) CancelTradeOffer(id uint64) error {
-	resp, err := session.client.PostForm(apiCancelTradeOffer, url.Values{
-		"key":          {session.apiKey},
-		"tradeofferid": {strconv.FormatUint(id, 10)},
-	})
+	resp, err := session.client.PostForm(
+		apiCancelTradeOffer, url.Values{
+			"key":          {session.apiKey},
+			"tradeofferid": {strconv.FormatUint(id, 10)},
+		},
+	)
 	if resp != nil {
 		resp.Body.Close()
 	}
@@ -462,11 +504,13 @@ func (session *Session) AcceptTradeOffer(id uint64) error {
 	req, err := http.NewRequest(
 		http.MethodPost,
 		postURL+"/accept",
-		strings.NewReader(url.Values{
-			"sessionid":    {session.sessionID},
-			"serverid":     {"1"},
-			"tradeofferid": {tid},
-		}.Encode()),
+		strings.NewReader(
+			url.Values{
+				"sessionid":    {session.sessionID},
+				"serverid":     {"1"},
+				"tradeofferid": {tid},
+			}.Encode(),
+		),
 	)
 	if err != nil {
 		return err
